@@ -1,0 +1,8 @@
+#!/bin/sh
+
+[ "$ACTION" = ifup ] || [ "$ACTION" = ifdown ] || return 0
+[ "$(uci -q get lan-service-gateway.main.enabled)" = 1 ] || return 0
+lan_network=$(uci -q get lan-service-gateway.main.lan_network)
+wan_network=$(uci -q get lan-service-gateway.main.wan_network)
+[ "$INTERFACE" = "${lan_network:-lan}" ] || [ "$INTERFACE" = "${wan_network:-wwan}" ] || return 0
+/etc/init.d/lan-service-gateway restart

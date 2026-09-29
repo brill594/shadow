@@ -1,0 +1,113 @@
+#!/bin/sh /etc/rc.common
+
+USE_PROCD=1
+START=95
+STOP=10
+
+RUNTIME_CONFIG=/tmp/lan-service-gateway.conf
+APPLY_RULES=/tmp/lan-service-gateway.apply
+RULE_DIR=/usr/share/nftables.d
+NAT_RULE=$RULE_DIR/chain-pre/dstnat/90-lan-service-gateway.nft
+FORWARD_RULE=$RULE_DIR/chain-pre/forward/90-lan-service-gateway.nft
+CHAIN_RULE=$RULE_DIR/table-post/90-lan-service-gateway.nft
+
+cleanup_rules() {
+	local chain parent handle
+	rm -f "$NAT_RULE" "$FORWARD_RULE" "$CHAIN_RULE" "$RUNTIME_CONFIG" "$APPLY_RULES"
+	for chain in lsg_dstnat lsg_forward; do
+		parent=dstnat
+		[ "$chain" = lsg_forward ] && parent=forward
+		for handle in $(nft -a list chain inet fw4 "$parent" 2>/dev/null | awk -v name="jump $chain" 'index($0, name) { print $NF }'); do
+			nft delete rule inet fw4 "$parent" handle "$handle" || return 1
+		done
+		nft flush chain inet fw4 "$chain" 2>/dev/null || :
+		nft delete chain inet fw4 "$chain" 2>/dev/null || :
+	done
+	return 0
+}
+
+apply_live_rules() {
+	nft list chain inet fw4 lsg_dstnat >/dev/null 2>&1 || nft add chain inet fw4 lsg_dstnat || return 1
+	nft list chain inet fw4 lsg_forward >/dev/null 2>&1 || nft add chain inet fw4 lsg_forward || return 1
+	nft -f "$APPLY_RULES" || return 1
+	nft list chain inet fw4 dstnat | grep -q 'jump lsg_dstnat' || nft insert rule inet fw4 dstnat jump lsg_dstnat comment 'lan-service-gateway' || return 1
+	nft list chain inet fw4 forward | grep -q 'jump lsg_forward' || nft insert rule inet fw4 forward jump lsg_forward comment 'lan-service-gateway' || return 1
+}
+
+emit_localsend() {
+	local section="$1" ip port proxy_port fingerprint
+	config_get ip "$section" ip
+	config_get port "$section" port
+	config_get proxy_port "$section" proxy_port
+	config_get fingerprint "$section" fingerprint '-'
+	printf 'localsend %s %s %s %s\n' "$ip" "$port" "$proxy_port" "$fingerprint"
+}
+
+emit_sunshine() {
+	local section="$1" ip tcp udp
+	config_get ip "$section" ip
+	config_get tcp "$section" tcp_port
+	config_get udp "$section" udp_port
+	[ -n "$tcp" ] || tcp='-'
+	[ -n "$udp" ] || udp='-'
+	printf 'sunshine %s %s %s\n' "$ip" "$(printf '%s' "$tcp" | tr ' ' ',')" "$(printf '%s' "$udp" | tr ' ' ',')"
+}
+
+prepare_config() {
+	local lan_network wan_network lan_device wan_device
+	config_load lan-service-gateway
+	config_get lan_network main lan_network lan
+	config_get wan_network main wan_network wwan
+	. /lib/functions/network.sh
+	network_get_device lan_device "$lan_network" || return 1
+	network_get_device wan_device "$wan_network" || return 1
+	printf 'interfaces %s %s\n' "$lan_device" "$wan_device"
+	config_foreach emit_localsend localsend
+	config_foreach emit_sunshine sunshine
+}
+
+start_service() {
+	local enabled
+	config_load lan-service-gateway
+	config_get_bool enabled main enabled 0
+	if [ "$enabled" != 1 ]; then
+		cleanup_rules
+		return 0
+	fi
+	if ! prepare_config > "$RUNTIME_CONFIG.new"; then
+		rm -f "$RUNTIME_CONFIG.new"
+		cleanup_rules
+		return 1
+	fi
+	mv "$RUNTIME_CONFIG.new" "$RUNTIME_CONFIG"
+	if ! /usr/sbin/lan-service-gateway render -config "$RUNTIME_CONFIG" -out-dir "$RULE_DIR" -apply "$APPLY_RULES" || ! fw4 check; then
+		cleanup_rules
+		return 1
+	fi
+	if ! apply_live_rules; then
+		cleanup_rules
+		return 1
+	fi
+	if grep -q '^localsend ' "$RUNTIME_CONFIG"; then
+		procd_open_instance
+		procd_set_param command /usr/sbin/lan-service-gateway run -config "$RUNTIME_CONFIG"
+		procd_set_param file /etc/config/lan-service-gateway
+		procd_set_param respawn 3600 5 5
+		procd_set_param stdout 1
+		procd_set_param stderr 1
+		procd_close_instance
+	fi
+}
+
+stop_service() {
+	cleanup_rules
+}
+
+reload_service() {
+	stop
+	start
+}
+
+service_triggers() {
+	procd_add_reload_trigger lan-service-gateway
+}
