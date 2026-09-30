@@ -29,6 +29,9 @@ type config struct {
 	wanDevice string
 	localSend []localSendMap
 	sunshine  *sunshineMap
+	auto      bool
+	autoStart uint16
+	autoEnd   uint16
 }
 
 var deviceName = regexp.MustCompile(`^[a-zA-Z0-9_.:-]+$`)
@@ -88,6 +91,16 @@ func readConfig(path string) (config, error) {
 				return bad()
 			}
 			c.sunshine = &sunshineMap{ip, tcp, udp}
+		case "auto":
+			if len(fields) != 3 || c.auto {
+				return bad()
+			}
+			start, err1 := parsePort(fields[1], true)
+			end, err2 := parsePort(fields[2], true)
+			if err1 != nil || err2 != nil || end < start || int(end)-int(start) > 1023 {
+				return bad()
+			}
+			c.auto, c.autoStart, c.autoEnd = true, start, end
 		default:
 			return bad()
 		}

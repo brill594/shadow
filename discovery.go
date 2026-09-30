@@ -7,12 +7,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
-	"net/netip"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -40,10 +37,17 @@ func rewriteAnnouncement(data []byte, m localSendMap) ([]byte, bool) {
 }
 
 func probeAnnouncement(m localSendMap) ([]byte, error) {
+	clientCertificate, err := probeClientCertificate()
+	if err != nil {
+		return nil, err
+	}
 	var certFingerprint string
 	transport := &http.Transport{TLSClientConfig: &tls.Config{
 		// LocalSend uses a self-signed certificate; compare it with its protocol identity.
 		InsecureSkipVerify: true,
+		GetClientCertificate: func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+			return &clientCertificate, nil
+		},
 		VerifyConnection: func(state tls.ConnectionState) error {
 			if len(state.PeerCertificates) == 0 {
 				return fmt.Errorf("missing LocalSend certificate")
@@ -91,97 +95,4 @@ func probeAnnouncement(m localSendMap) ([]byte, error) {
 		return nil, fmt.Errorf("LocalSend info cannot form an announcement")
 	}
 	return payload, nil
-}
-
-func runDiscovery(c config, lan, wan interfaceState) error {
-	if err := c.validateNetworks(lan, wan); err != nil {
-		return err
-	}
-	lanIn, lanOut, err := openMulticast(lan)
-	if err != nil {
-		return fmt.Errorf("LAN multicast: %w", err)
-	}
-	defer lanIn.Close()
-	lanOut.Close()
-	wanIn, wanOut, err := openMulticast(wan)
-	if err != nil {
-		return fmt.Errorf("WAN multicast: %w", err)
-	}
-	defer wanIn.Close()
-	defer wanOut.Close()
-
-	cache := make(map[netip.Addr][]byte)
-	var mu sync.RWMutex
-	for _, m := range c.localSend {
-		payload, err := probeAnnouncement(m)
-		if err != nil {
-			log.Printf("LocalSend probe %s: %v", m.ip, err)
-			continue
-		}
-		cache[m.ip] = payload
-		if _, err := wanOut.Write(payload); err != nil {
-			log.Printf("WAN multicast send: %v", err)
-		}
-	}
-
-	errors := make(chan error, 2)
-	go func() {
-		buf := make([]byte, 2049)
-		for {
-			n, sender, err := lanIn.ReadFromUDP(buf)
-			if err != nil {
-				errors <- fmt.Errorf("LAN multicast read: %w", err)
-				return
-			}
-			ip, ok := netip.AddrFromSlice(sender.IP.To4())
-			if !ok {
-				continue
-			}
-			for _, m := range c.localSend {
-				if m.ip != ip {
-					continue
-				}
-				payload, ok := rewriteAnnouncement(buf[:n], m)
-				if !ok {
-					continue
-				}
-				mu.Lock()
-				cache[ip] = payload
-				mu.Unlock()
-				if _, err := wanOut.Write(payload); err != nil {
-					log.Printf("WAN multicast send: %v", err)
-				}
-			}
-		}
-	}()
-	go func() {
-		buf := make([]byte, 2049)
-		var lastReplay time.Time
-		for {
-			n, sender, err := wanIn.ReadFromUDP(buf)
-			if err != nil {
-				errors <- fmt.Errorf("WAN multicast read: %w", err)
-				return
-			}
-			ip, ok := netip.AddrFromSlice(sender.IP.To4())
-			if !ok || ip == wan.ip || time.Since(lastReplay) < 5*time.Second {
-				continue
-			}
-			var message struct {
-				Announce bool `json:"announce"`
-			}
-			if json.Unmarshal(buf[:n], &message) != nil || !message.Announce {
-				continue
-			}
-			lastReplay = time.Now()
-			mu.RLock()
-			for _, payload := range cache {
-				if _, err := wanOut.Write(payload); err != nil {
-					log.Printf("WAN multicast replay: %v", err)
-				}
-			}
-			mu.RUnlock()
-		}
-	}()
-	return <-errors
 }

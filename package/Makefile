@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=lan-service-gateway
 PKG_VERSION:=0.1.0
-PKG_RELEASE:=3
+PKG_RELEASE:=6
 PKG_LICENSE:=MIT
 PKG_LICENSE_FILES:=LICENSE
 PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)-$(PKG_VERSION)
@@ -12,13 +12,14 @@ include $(INCLUDE_DIR)/package.mk
 define Package/lan-service-gateway
   SECTION:=net
   CATEGORY:=Network
-  TITLE:=LocalSend discovery and selected LAN service gateway
+  TITLE:=LocalSend discovery gateway for routed LANs
   DEPENDS:=+firewall4
 endef
 
 define Package/lan-service-gateway/description
-  Relays selected LocalSend announcements and installs narrow firewall4
-  mappings for LocalSend and one configured Sunshine host.
+  Discovers verified downstream LocalSend peers, publishes them upstream,
+  and installs narrow firewall4 mappings. Optionally forwards ports for
+  one configured Sunshine host.
 endef
 
 define Package/lan-service-gateway/conffiles
